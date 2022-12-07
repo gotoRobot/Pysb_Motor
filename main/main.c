@@ -17,7 +17,7 @@
 #include <math.h>
 
 #define CLASS 3
-
+const char* tagSteps="Steps"; 
 enum{
     origin, speed, position, class, mode_main
 }motor_mode;
@@ -52,6 +52,8 @@ struct class_handle{
 struct class_handle class_struct1={0,0,0,0,0,0,0,0,0.0};
 struct class_handle * class_struct; 
 bool classflag=0;
+#define Pos_PE 22
+#define V_Current_PE 10
 
 struct SpeedHandle{ 
     float v_current;
@@ -248,8 +250,10 @@ void PysbMotorLoop(struct StartHandle * start_handle){
         TickType_t xLastWakeTime0;
         xLastWakeTime0 = xTaskGetTickCount();
         enc_cnt = encoder->get_counter_value(encoder);
-        start_handle->v_current =(enc_cnt - start_handle->enc_cnt_p) * PARA_ENCODER;
+        start_handle->enc_cnt_p = enc_cnt;
         vTaskDelayUntil(&xLastWakeTime0, 10/ portTICK_PERIOD_MS);
+        enc_cnt = encoder->get_counter_value(encoder);
+        start_handle->v_current =(enc_cnt - start_handle->enc_cnt_p) * PARA_ENCODER;
         if(start_handle->v_current>=0){
             if(start_handle->v_current>start_handle->v_max){
                 start_handle->v_max=start_handle->v_current;
@@ -300,41 +304,42 @@ void PysbMotorLoop(struct StartHandle * start_handle){
             else if (u < -4.99f)
             {
                 u = -4.99f;
-                windup = 2;
+                windup = 2;     //TODO：对于积分环节的启用
             }
             printf("u:%f",u);
             mcpwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_GEN_A, (1 - (u + 5.0f) / 10.0f) * 100);
             mcpwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_GEN_B, (u + 5.0f) / 10.0f * 100);
         }
         classflag=1;
-        printf("class lock running\n");//TODO可以设置多次单次运行以后默认单词运行的方式
-        class_struct=&class_struct1;//SAVE
+        ESP_LOGI(tagSteps,"class lock running\n");//TODO可以设置多次单次运行以后默认单词运行的方式
+        class_struct=&class_struct1;
         enc_cnt=encoder->get_counter_value(encoder);
         float class_v_current;
         int32_t class_enc_cnt_p=enc_cnt;
         while(classflag!=0){
             float raw_val;
             TickType_t xLastWakeTime2;
+            PysbMotorClassPositionSet(class_struct);    //计算当前位置误差
+            PysbMotorClassPositionControl(class_struct);//力矩反馈TODO
             xLastWakeTime2 = xTaskGetTickCount();
             enc_cnt=encoder->get_counter_value(encoder);
-            PysbMotorClassPositionSet(class_struct);    //当检测到位置误差小于22退出循环
-            PysbMotorClassPositionControl(class_struct);//力矩反馈TODO
-            class_v_current = (float)(enc_cnt - class_enc_cnt_p) * PARA_ENCODER; 
             class_enc_cnt_p=enc_cnt;
             vTaskDelayUntil(&xLastWakeTime2, 10/ portTICK_PERIOD_MS);
+            enc_cnt=encoder->get_counter_value(encoder);
+            class_v_current = (float)(enc_cnt - class_enc_cnt_p) * PARA_ENCODER;
             printf("class_v_current:%f\n",class_v_current);
             printf_class();
             while(xQueueReceive(power_queue, &raw_val, portMAX_DELAY) != pdTRUE){
             //等待中断中读入电流值
-                printf("class power waiting\n");    //TODO:DELETE这段时间很有可能是不存在的
+                ESP_LOGI(tagSteps,"class power waiting\n");    //TODO:DELETE这段时间很有可能是不存在的
             }
             i_current = (float)(raw_val ) * 0.000634921f;	//raw_val to current(A);
             i_error = (* class_struct).i_target - i_current;
             u =8*i_error;
-            classflag=((* class_struct).degree_cnt<=22&&(* class_struct).degree_cnt>=-22)&&class_v_current<=10&&class_v_current>=-10;//此式为真则推出
+            classflag=((* class_struct).degree_cnt<=Pos_PE&&(* class_struct).degree_cnt>=-Pos_PE)&&class_v_current<=V_Current_PE&&class_v_current>=-V_Current_PE;//当检测到位置误差小于22并且当前速度趋于0退出循环
             classflag=!classflag;
             if(classflag==false){
-                printf("exist class lock\n");
+                ESP_LOGI(tagSteps,"exist class lock\n");
                 classflag=0;    //结束自动运行
             }
             mcpwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_GEN_A, (1 - (u + 5.0f) / 10.0f) * 100);
@@ -343,39 +348,40 @@ void PysbMotorLoop(struct StartHandle * start_handle){
     }
     else{                                           //(start_handle0.v_end<=V_End_TH&&start_handle0.v_end<=-V_End_TH)
         classflag=1;
-        printf("class lock running\n");//TODO可以设置多次单次运行以后默认单词运行的方式
-        class_struct=&class_struct1;//SAVE
+        ESP_LOGI(tagSteps,"class lock running\n");//TODO可以设置多次单次运行以后默认单词运行的方式
+        class_struct=&class_struct1;
         enc_cnt=encoder->get_counter_value(encoder);
         float class_v_current;
         int32_t class_enc_cnt_p=enc_cnt;
         while(classflag!=0){
             float raw_val;
             TickType_t xLastWakeTime2;
+            PysbMotorClassPositionSet(class_struct);    //计算当前位置误差
+            PysbMotorClassPositionControl(class_struct);//力矩反馈TODO
             xLastWakeTime2 = xTaskGetTickCount();
             enc_cnt=encoder->get_counter_value(encoder);
-            PysbMotorClassPositionSet(class_struct);    //当检测到位置误差小于22退出循环
-            PysbMotorClassPositionControl(class_struct);//力矩反馈TODO
-            class_v_current = (float)(enc_cnt - class_enc_cnt_p) * PARA_ENCODER; 
             class_enc_cnt_p=enc_cnt;
             vTaskDelayUntil(&xLastWakeTime2, 10/ portTICK_PERIOD_MS);
+            enc_cnt=encoder->get_counter_value(encoder);
+            class_v_current = (float)(enc_cnt - class_enc_cnt_p) * PARA_ENCODER;
             printf("class_v_current:%f\n",class_v_current);
             printf_class();
             while(xQueueReceive(power_queue, &raw_val, portMAX_DELAY) != pdTRUE){
             //等待中断中读入电流值
-                printf("class power waiting\n");    //TODO:DELETE这段时间很有可能是不存在的
+                ESP_LOGI(tagSteps,"class power waiting\n");    //TODO:DELETE这段时间很有可能是不存在的
             }
             i_current = (float)(raw_val ) * 0.000634921f;	//raw_val to current(A);
             i_error = (* class_struct).i_target - i_current;
             u =8*i_error;
-            classflag=((* class_struct).degree_cnt<=22&&(* class_struct).degree_cnt>=-22)&&class_v_current<=10&&class_v_current>=-10;//此式为真则推出
+            classflag=((* class_struct).degree_cnt<=Pos_PE&&(* class_struct).degree_cnt>=-Pos_PE)&&class_v_current<=V_Current_PE&&class_v_current>=-V_Current_PE;//当检测到位置误差小于22并且当前速度趋于0退出循环
             classflag=!classflag;
             if(classflag==false){
-                printf("exist class lock\n");
+                ESP_LOGI(tagSteps,"exist class lock\n");
                 classflag=0;    //结束自动运行
             }
             mcpwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_GEN_A, (1 - (u + 5.0f) / 10.0f) * 100);
             mcpwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_GEN_B, (u + 5.0f) / 10.0f * 100);
-        }       
+        }      
     }
 }
     
@@ -384,19 +390,6 @@ void PysbMotorLoopReset(struct StartHandle * start_handle){
     start_handle->v_max=0;
     start_handle->CW=0;
 }
-  /*   switch (motor_mode)
-            {
-            
-            case position:
-                position_struct=&position_struct1;
-                xTaskCreate(position_thread, "position_thread", 4095, position_struct, 5, NULL);
-                break;
-
-            default:
-                break;
-            }
-
-     */
 
 void app_main(void){
     PysbMotorInit();
@@ -562,12 +555,11 @@ void PysbMotorClassPositionControl(struct class_handle * class_struct){
 inline void PysbMotorSpeedSampling(struct SpeedHandle * speed_struct){
     TickType_t xLastWakeTime;
     xLastWakeTime = xTaskGetTickCount();
-
+    enc_cnt = encoder->get_counter_value(encoder);
+    speed_struct->enc_cnt_p = enc_cnt;
+    vTaskDelayUntil(&xLastWakeTime, 10/ portTICK_PERIOD_MS);
     enc_cnt = encoder->get_counter_value(encoder);
     speed_struct->v_current = (float)(enc_cnt - speed_struct->enc_cnt_p) * PARA_ENCODER; 
-    speed_struct->enc_cnt_p = enc_cnt;
-
-    vTaskDelayUntil(&xLastWakeTime, 10/ portTICK_PERIOD_MS);
     if(speed_struct->v_current<=40&&speed_struct->v_current>=-40){
         printf("exist auto running\n");
         speedflag=0;    //结束自动运行
