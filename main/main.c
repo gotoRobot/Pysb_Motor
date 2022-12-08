@@ -16,7 +16,7 @@
 #include "rotary_encoder.h"
 #include <math.h>
 
-#define CLASS 3
+#define CLASS 2
 const char* tagSteps="Steps"; 
 enum{
     origin, speed, position, class, mode_main
@@ -213,7 +213,7 @@ inline void PysbMotorInitA(){
     class_struct1.half_class_range=class_struct1.class_range/2;
 
     rotary_settings_timer = xTimerCreate( "rotary_settings_timer", 
-                                            500 / portTICK_PERIOD_MS,   // The timer period in ticks.
+                                            300 / portTICK_PERIOD_MS,   // The timer period in ticks.
                                             pdFALSE,        // The timers will auto-reload themselves when they expire.
                                             ( void * ) 0,  // Assign each timer a unique id equal to its array index.
                                             RotartSettingsCallback // Each timer calls the same callback when it expires.
@@ -246,6 +246,8 @@ void PysbMotorLoop(struct StartHandle * start_handle){
     xTimerStart(rotary_settings_timer,0);
     
     while(loopflag!=0){
+        int16_t v_max_positive=0;
+        int16_t v_max_negative=0;
         printf("setting\n"); 
         TickType_t xLastWakeTime0;
         xLastWakeTime0 = xTaskGetTickCount();
@@ -255,15 +257,37 @@ void PysbMotorLoop(struct StartHandle * start_handle){
         enc_cnt = encoder->get_counter_value(encoder);
         start_handle->v_current =(enc_cnt - start_handle->enc_cnt_p) * PARA_ENCODER;
         if(start_handle->v_current>=0){
-            if(start_handle->v_current>start_handle->v_max){
-                start_handle->v_max=start_handle->v_current;
+            if(start_handle->v_current>v_max_positive){
+                v_max_positive=start_handle->v_current;
+                if(start_handle->v_max<0)
+                {
+                    if(v_max_positive>-start_handle->v_max){
+                        start_handle->v_max=v_max_positive;
+                    }
+                }
+                else{
+                    if(v_max_positive>start_handle->v_max){
+                        start_handle->v_max=v_max_positive;
+                    }
+                }
             }//refresh v_max
             start_handle->CW='L';
             u=-Blocked_Rotation_Voltage;
         }
         else if(start_handle->v_current<0){
-            if(start_handle->v_current<start_handle->v_max){
-                start_handle->v_max=start_handle->v_current;
+            if(start_handle->v_current<v_max_negative){
+                v_max_negative=start_handle->v_current;
+                if(start_handle->v_max>0)
+                {
+                    if(v_max_negative<-start_handle->v_max){
+                        start_handle->v_max=v_max_negative;
+                    }
+                }
+                else{
+                    if(v_max_negative<start_handle->v_max){
+                        start_handle->v_max=v_max_negative;
+                    }
+                }
             }//refresh v_max
             start_handle->CW='R';
             u=Blocked_Rotation_Voltage;
