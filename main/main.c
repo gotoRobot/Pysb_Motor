@@ -114,9 +114,6 @@ bool loopflag=0;
 
 
 static void pwm_isr(void *arg);
-/* static void current_thread(void *arg); */
-static void power_thread(void *arg);
-static void position_thread(struct position_handle *position_struct);//将encoder复位
 
 void PysbMotorInitA();//初始化ESP32电机中断，GPIO，电流偏差等
 void PysbMotorInit();
@@ -306,7 +303,7 @@ void PysbMotorLoop(struct StartHandle * start_handle){
         float raw_val;
         float i_error_speed;
         speedflag=1;
-        speed_struct1.v_target=start_handle0.v_end;
+        speed_struct1.v_target=start_handle0.v_max*0.5;
         speed_struct=&speed_struct1;
         printf("auto running\n"); 
         while(speedflag!=0){
@@ -452,37 +449,6 @@ static void IRAM_ATTR pwm_isr(void *arg)
 }
 
 /*--------------------------------------------------------------------------------------------------------*/
-void position_thread(struct position_handle *position_struct){
-    position_struct->pos_target=position_struct->angle*5.95277778f;
-    position_struct->motor_position_status=0;
-    while(1){
-        PysbMotorPositionSampling();
-
-        PysbMotorPositionSet(position_struct);
-
-        PysbMotorPositionControl(position_struct);
-
-        xQueueSend(position_queue, &position_struct->i_target, portMAX_DELAY);
-    }
-}
-
-
-inline void PysbMotorPositionSampling(){
-    enc_cnt=encoder->get_counter_value(encoder);
-}
-
-inline void PysbMotorPositionSet(struct position_handle * position_struct){
-    (*position_struct).pos_error=enc_cnt-(*position_struct).pos_target;
-    if((*position_struct).pos_error<=22&&(*position_struct).pos_error>-22){
-        (*position_struct).motor_position_status=0;
-    }
-    else if((*position_struct).pos_error>22){
-        (*position_struct).motor_position_status=1;
-    }//正转
-    else{
-        (*position_struct).motor_position_status=2;
-    }//enc_cnt<0，反转
-}
 
 //误差计算节点的切换，计算误差，设置档位和分度值
 inline void PysbMotorClassPositionSet(struct class_handle * class_struct){
