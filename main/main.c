@@ -14,10 +14,17 @@
 #include "driver/adc.h"
 #include "esp_log.h"
 #include "rotary_encoder.h"
+#include "driver/timer.h"
 #include <math.h>
 
 #define CLASS 2
+
+#define TIMER_DIVIDER         (16)  //  Hardware timer clock divider
+#define TIMER_SCALE           (TIMER_BASE_CLK / TIMER_DIVIDER)  // convert counter value to seconds
+#define ClassSetIntervalSec 0.5
+
 const char* tagSteps="Steps"; 
+const char* tagClass="Class"; 
 enum{
     origin, speed, position, class, mode_main
 }motor_mode;
@@ -65,9 +72,9 @@ struct SpeedHandle{
 };
 struct SpeedHandle * speed_struct;
 struct SpeedHandle speed_struct1={0,0,0,0,0,0};
+
 bool speedflag=0;     //1,自动运行；0,不自动运行
 #define i_limit 0.45f
-
 
 struct StartHandle{
     char CW;    //clockwise
@@ -113,15 +120,11 @@ bool loopflag=0;
     #define PARA_ENCODER 14.28f //(DELAY_HZ)100*2pi/44 11线编码器
 
 
-static void pwm_isr(void *arg);
-
+static void PwmIsr(void *arg);
+static void ClassSetIsr(struct class_handle * class_struct);
 void PysbMotorInitA();//初始化ESP32电机中断，GPIO，电流偏差等
 void PysbMotorInit();
-/* void PysbMotorInitB();//初始化数据结构体 */
 
-inline void PysbMotorPositionSampling();
-inline void PysbMotorPositionSet(struct position_handle * position_struct);
-/* inline void PysbMotorSpeedSet(); */
 void PysbMotorPositionControl(struct position_handle * position_struct);
 inline void PysbMotorClassPositionSet(struct class_handle * class_struct);
 void PysbMotorClassPositionControl(struct class_handle * class_struct);
@@ -197,13 +200,24 @@ inline void PysbMotorInitA(){
     pwm_config.duty_mode = MCPWM_DUTY_MODE_1;
     mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_0, &pwm_config);
 
+    pwm_config.frequency = 10;
+    pwm_config.cmpr_a = 50.0f;
+    pwm_config.cmpr_b = 50.0f;
+    pwm_config.counter_mode =  MCPWM_UP_DOWN_COUNTER;
+    pwm_config.duty_mode = MCPWM_DUTY_MODE_1;
+    mcpwm_init(MCPWM_UNIT_1, MCPWM_TIMER_1, &pwm_config);
+
     power_queue = xQueueCreate(1, sizeof(int32_t));
     position_queue = xQueueCreate(1, sizeof(float));
     class_queue = xQueueCreate(1, sizeof(float));
     speed_queue = xQueueCreate(1, sizeof(float));
 
     MCPWM0.int_ena.val = MCPWM_TIMER0_TEZ_INT_ENA;
-    mcpwm_isr_register(MCPWM_UNIT_0, pwm_isr, NULL, ESP_INTR_FLAG_IRAM, NULL);
+    mcpwm_isr_register(MCPWM_UNIT_0, PwmIsr, NULL, ESP_INTR_FLAG_IRAM, NULL);
+    mcpwm_isr_register(MCPWM_UNIT_1, ClassSetIsr, class_struct, ESP_INTR_FLAG_IRAM, NULL);
+
+    speed_struct=&speed_struct1;
+    class_struct=&class_struct1;
 
     class_struct1.num=CLASS;
     class_struct1.class_range=ONE_ROUND/class_struct1.num;
@@ -215,6 +229,29 @@ inline void PysbMotorInitA(){
                                             ( void * ) 0,  // Assign each timer a unique id equal to its array index.
                                             RotartSettingsCallback // Each timer calls the same callback when it expires.
                                         );
+
+    timer_config_t config = {
+        .divider = TIMER_DIVIDER,
+        .counter_dir = TIMER_COUNT_UP,
+        .counter_en = TIMER_PAUSE,
+        .alarm_en = TIMER_ALARM_EN,
+        .auto_reload = true,
+    }; // default clock source is APB
+    timer_init(TIMER_GROUP_0, TIMER_0, &config);
+
+    /* Timer's counter will initially start from value below.
+       Also, if auto_reload is set, this value will be automatically reload on alarm */
+    timer_set_counter_value(TIMER_GROUP_0, TIMER_0, 0);
+
+    /* Configure the alarm value and the interrupt on alarm. */
+    timer_set_alarm_value(TIMER_GROUP_0, TIMER_0, ClassSetIntervalSec * TIMER_SCALE);
+    timer_enable_intr(TIMER_GROUP_0, TIMER_0);
+
+    timer_isr_callback_add(TIMER_GROUP_0, TIMER_0, ClassSetIsr, class_struct, 0);
+
+    timer_start(TIMER_GROUP_0, TIMER_0);
+
+    
 }
 
 void RotartSettingsCallback( TimerHandle_t rotary_settings_timer){
@@ -236,7 +273,6 @@ void PysbMotorLoop(struct StartHandle * start_handle){
         vTaskDelayUntil(&xLastWakeTime0, 10/ portTICK_PERIOD_MS);
         enc_cnt = encoder->get_counter_value(encoder);
         start_handle->v_start =(enc_cnt - start_handle->enc_cnt_p) * PARA_ENCODER;
-
     }
 
     loopflag=1;     //计时结束后复位为0
@@ -288,6 +324,7 @@ void PysbMotorLoop(struct StartHandle * start_handle){
             }//refresh v_max
             start_handle->CW='R';
             u=Blocked_Rotation_Voltage;
+            ESP_LOGI(tagClass,"Class:%d",class_struct1.class_cnt);
         }
 
         start_handle->v_end=start_handle->v_current;//refresh v_end
@@ -296,7 +333,6 @@ void PysbMotorLoop(struct StartHandle * start_handle){
         mcpwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_GEN_B, (u + 5.0f) / 10.0f * 100);
 
         start_handle->enc_cnt_p = enc_cnt;
-        
     }
 
     if(start_handle0.v_end>=V_End_TH||start_handle0.v_end<=-V_End_TH){
@@ -304,12 +340,13 @@ void PysbMotorLoop(struct StartHandle * start_handle){
         float i_error_speed;
         speedflag=1;
         speed_struct1.v_target=start_handle0.v_max*0.5;
-        speed_struct=&speed_struct1;
+        
         printf("auto running\n"); 
         while(speedflag!=0){
             PysbMotorSpeedSampling(speed_struct);   //当检测到速度被捏停退出循环
             PysbMotorSpeedControl(speed_struct);    //控制速度TODO
-            printf_speed();
+            /* printf_speed(); */
+            ESP_LOGI(tagClass,"Class:%d",class_struct1.class_cnt);
             while(xQueueReceive(power_queue, &raw_val, portMAX_DELAY) != pdTRUE){
             //等待中断中读入电流值
                 printf("speed power waiting\n");
@@ -333,7 +370,7 @@ void PysbMotorLoop(struct StartHandle * start_handle){
         }
         classflag=1;
         ESP_LOGI(tagSteps,"class lock running\n");//TODO可以设置多次单次运行以后默认单词运行的方式
-        class_struct=&class_struct1;
+        
         enc_cnt=encoder->get_counter_value(encoder);
         float class_v_current;
         int32_t class_enc_cnt_p=enc_cnt;
@@ -370,7 +407,6 @@ void PysbMotorLoop(struct StartHandle * start_handle){
     else{                                           //(start_handle0.v_end<=V_End_TH&&start_handle0.v_end<=-V_End_TH)
         classflag=1;
         ESP_LOGI(tagSteps,"class lock running\n");//TODO可以设置多次单次运行以后默认单词运行的方式
-        class_struct=&class_struct1;
         enc_cnt=encoder->get_counter_value(encoder);
         float class_v_current;
         int32_t class_enc_cnt_p=enc_cnt;
@@ -433,7 +469,32 @@ void app_main(void){
     }
 }
 
-static void IRAM_ATTR pwm_isr(void *arg)
+void ClassSetIsr(struct class_handle * class_struct){
+    {
+        enc_cnt = encoder->get_counter_value(encoder);
+        (*class_struct).enc_error=enc_cnt;
+        
+        if((*class_struct).enc_error>0){
+            (*class_struct).motor_position_status=1;
+        }//pos正偏
+        else if((*class_struct).enc_error<0){
+            (*class_struct).motor_position_status=2;
+        }//pos负偏
+
+        int16_t _enc_error=(*class_struct).enc_error+(*class_struct).half_class_range;
+
+        if((*class_struct).motor_position_status==1){
+            (* class_struct).motor_class_status=1;
+            (* class_struct).class_cnt=_enc_error/(*class_struct).class_range;   
+        }//正转
+        else if((*class_struct).motor_position_status==2){
+            (* class_struct).motor_class_status=2;
+            (* class_struct).class_cnt=_enc_error/(*class_struct).class_range-1;
+        }//enc_cnt<0，反转        
+    }
+}
+
+static void IRAM_ATTR PwmIsr(void *arg)
 {
     uint32_t mcpwm_intr_status;
     int32_t raw_val;
@@ -446,6 +507,7 @@ static void IRAM_ATTR pwm_isr(void *arg)
     }
     MCPWM0.int_clr.val = mcpwm_intr_status;
     portYIELD_FROM_ISR(high_task_awoken);
+    
 }
 
 /*--------------------------------------------------------------------------------------------------------*/
@@ -479,7 +541,6 @@ inline void PysbMotorClassPositionSet(struct class_handle * class_struct){
 
     
     (* class_struct).degree_cnt=enc_cnt-(* class_struct).class_cnt*(*class_struct).class_range;
-
 }
 
 #define k1 0.0241f
