@@ -75,6 +75,15 @@ struct SpeedHandle{
 struct SpeedHandle * speed_struct;
 struct SpeedHandle speed_struct1={0,0,0,0,0,0};
 
+//动态脱手检测：
+inline bool stable_judgment(struct SpeedHandle *speed_struct){
+    int16_t v_sum;
+    for(uint8_t i=0;i<7;i++){
+        v_sum += speed_struct->v_current_p[i];
+    }
+    return ((v_sum/7)-speed_struct->v_target)>=//TODO
+}
+
 inline bool increasing_judgment(struct SpeedHandle *speed_struct){
     if(speed_struct->v_target>=0){
         for(uint8_t i=1;i<7;){
@@ -253,6 +262,7 @@ inline void PysbMotorInitA(){
     mcpwm_isr_register(MCPWM_UNIT_1, ClassSetIsr, class_struct, ESP_INTR_FLAG_IRAM, NULL);
 
     speed_struct=&speed_struct1;
+    //动态脱手检测：
     for(uint8_t i=0;i<7;i++){
         speed_struct->v_current_p[i]=0;
     }
@@ -374,8 +384,12 @@ void PysbMotorLoop(struct StartHandle * start_handle){
     if(start_handle0.v_end>=V_End_TH||start_handle0.v_end<=-V_End_TH){
         float raw_val;
         float i_error_speed;
+        //动态脱手检测：
+        bool stableflag;
+        bool judgmentflag;
         speedflag=1;
         speed_struct1.v_target=start_handle0.v_max*0.5;
+        uint8_t j=0;    //动态脱手检测：用于记录前7个数据
         if(speed_struct1.v_target>=300){
             speed_struct1.v_target=300;
         }
@@ -393,8 +407,23 @@ void PysbMotorLoop(struct StartHandle * start_handle){
         
         while(speedflag!=0){
             PysbMotorSpeedSampling(speed_struct);   //当检测到速度被捏停退出循环，TODO2，当检测到速度重新设定时进入改变v_target流程
-                PysbMotorSpeedControl(speed_struct);    //控制速度
-            /* printf_speed(); */           
+            PysbMotorSpeedControl(speed_struct);    //控制速度
+            /* printf_speed(); */
+            //动态脱手检测：
+            if(j!=7){
+                speed_struct->v_current_p[j]=speed_struct->v_current;
+                j++;
+            }
+            else{
+                for(uint8_t i=1;i<6;i++){
+                    speed_struct->v_current_p[i-1]=speed_struct->v_current_p[i];
+                }
+                speed_struct->v_current_p[6]=speed_struct->v_current;
+            }
+            judgmentflag=(increasing_judgment(speed_struct)||decreasing_judgment(speed_struct));
+            if(judgmentflag){
+                ESP_LOGI(tagSpeed,"go into speedsetting");
+            }
             printf("%f\t%f\n",speed_struct1.v_current,speed_struct1.v_target);
             /* ESP_LOGI(tagSpeed,"%f\t%f",speed_struct1.v_current,speed_struct1.v_target); */
             /* ESP_LOGI(tagClass,"Class:%d",class_struct1.class_cnt); */
@@ -402,7 +431,7 @@ void PysbMotorLoop(struct StartHandle * start_handle){
             //等待中断中读入电流值
                 printf("speed power waiting\n");
             }
-            i_current = (float)(raw_val ) * 0.000634921f;	//raw_val to current(A);
+            i_current = (float)(raw_val) * 0.000634921f;	//raw_val to current(A);
             i_error_speed = (* speed_struct).i_target - i_current;
             u =i_error_speed * 8;//TODO
             if (u > 4.99f)
@@ -426,6 +455,11 @@ void PysbMotorLoop(struct StartHandle * start_handle){
             speed_struct->v_target=0;
             speed_struct->v_current=0;
             speed_struct->e_sum=0;
+            //动态脱手检测：
+            judgmentflag=0;
+            for(uint8_t i=0;i<7;i++){
+                speed_struct->v_current_p[i]=0;
+            }
         }
 
         //TODO1: 发送信息：用户停止自动运行
