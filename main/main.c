@@ -63,16 +63,59 @@ bool classflag=0;
 #define Pos_PE 22
 #define V_Current_PE 10
 
-struct SpeedHandle{ 
+struct SpeedHandle{
     float v_current;
     float v_target;
     int16_t e_sum;
     float v_error;
     float i_target;//仅用于在control环节做额定电流设置
     int32_t enc_cnt_p;
+    float v_current_p[7];
 };
 struct SpeedHandle * speed_struct;
 struct SpeedHandle speed_struct1={0,0,0,0,0,0};
+
+inline bool increasing_judgment(struct SpeedHandle *speed_struct){
+    if(speed_struct->v_target>=0){
+        for(uint8_t i=1;i<7;){
+            if(speed_struct->v_current_p[i]>=speed_struct->v_current_p[i-1])
+                i++;
+            else
+                return false;
+        }
+        return true;
+    }
+    else{
+        for(uint8_t i=1;i<7;){
+        if(speed_struct->v_current_p[i]<=speed_struct->v_current_p[i-1])
+            i++;
+        else
+            return false;
+        }
+        return true;
+    }
+};
+
+inline bool decreasing_judgment(struct SpeedHandle *speed_struct){
+    if(speed_struct->v_target>=0){
+        for(uint8_t i=1;i<7;){
+            if(speed_struct->v_current_p[i]>=speed_struct->v_current_p[i-1])
+                i++;
+            else
+                return false;
+        }
+        return true;
+    }
+    else{
+        for(uint8_t i=1;i<7;){
+        if(speed_struct->v_current_p[i]<=speed_struct->v_current_p[i-1])
+            i++;
+        else
+            return false;
+        }
+        return true;
+    }
+};
 
 bool speedflag=0;     //1,自动运行；0,不自动运行
 #define i_limit 0.45f
@@ -210,6 +253,9 @@ inline void PysbMotorInitA(){
     mcpwm_isr_register(MCPWM_UNIT_1, ClassSetIsr, class_struct, ESP_INTR_FLAG_IRAM, NULL);
 
     speed_struct=&speed_struct1;
+    for(uint8_t i=0;i<7;i++){
+        speed_struct->v_current_p[i]=0;
+    }
     class_struct=&class_struct1;
 
     class_struct1.num=CLASS;
@@ -346,9 +392,8 @@ void PysbMotorLoop(struct StartHandle * start_handle){
         }
         
         while(speedflag!=0){
-            
-            PysbMotorSpeedSampling(speed_struct);   //当检测到速度被捏停退出循环
-            PysbMotorSpeedControl(speed_struct);    //控制速度
+            PysbMotorSpeedSampling(speed_struct);   //当检测到速度被捏停退出循环，TODO2，当检测到速度重新设定时进入改变v_target流程
+                PysbMotorSpeedControl(speed_struct);    //控制速度
             /* printf_speed(); */           
             printf("%f\t%f\n",speed_struct1.v_current,speed_struct1.v_target);
             /* ESP_LOGI(tagSpeed,"%f\t%f",speed_struct1.v_current,speed_struct1.v_target); */
@@ -377,6 +422,12 @@ void PysbMotorLoop(struct StartHandle * start_handle){
         
         speedflag=0;//自动运行结束
         ESP_LOGI(tagSteps,"exist auto running\n");
+        {
+            speed_struct->v_target=0;
+            speed_struct->v_current=0;
+            speed_struct->e_sum=0;
+        }
+
         //TODO1: 发送信息：用户停止自动运行
         /* wheelDriverBleTx(Target target=ControlBlock, u8 *tx_buffer, u16 tx_buffer_len); */
 
@@ -385,7 +436,6 @@ void PysbMotorLoop(struct StartHandle * start_handle){
         
         enc_cnt=encoder->get_counter_value(encoder);
         float class_v_current;
-        int16_t class_enc_cnt_p=enc_cnt;
         int16_t class_cnt_p=class_struct->class_cnt;
         while(classflag!=0){
             float raw_val;
@@ -424,19 +474,12 @@ void PysbMotorLoop(struct StartHandle * start_handle){
         ESP_LOGI(tagSteps,"class lock running\n");//TODO0:可以设置多次单次运行以后默认单词运行的方式
         enc_cnt=encoder->get_counter_value(encoder);
         float class_v_current;
-        int16_t class_enc_cnt_p=enc_cnt;
         while(classflag!=0){
             float raw_val;
             enc_cnt=encoder->get_counter_value(encoder);
             PysbMotorClassPositionSet(class_struct);    //计算当前位置误差
             PysbMotorClassPositionControl(class_struct);//力矩反馈
-            /* TickType_t xLastWakeTime2;
-            xLastWakeTime2 = xTaskGetTickCount();
-            enc_cnt=encoder->get_counter_value(encoder);
-            class_enc_cnt_p=enc_cnt;
-            vTaskDelayUntil(&xLastWakeTime2, 10/ portTICK_PERIOD_MS);
-            enc_cnt=encoder->get_counter_value(encoder); */
-            class_v_current = SpeedSample();/* (float)(enc_cnt - class_enc_cnt_p) * PARA_ENCODER; */
+            class_v_current = SpeedSample();
             printf("class_v_current:%f\n",class_v_current);
             printf_class();
             while(xQueueReceive(power_queue, &raw_val, portMAX_DELAY) != pdTRUE){
@@ -555,7 +598,6 @@ inline void PysbMotorClassPositionSet(struct class_handle * class_struct){
         (* class_struct).class_cnt=_enc_error/(*class_struct).class_range-1;
     }//enc_cnt<0，反转
 
-    
     (* class_struct).degree_cnt=enc_cnt-(* class_struct).class_cnt*(*class_struct).class_range;
 }
 
@@ -591,7 +633,6 @@ void PysbMotorPositionControl(struct position_handle *position_struct){
 }
 
 void PysbMotorClassPositionControl(struct class_handle * class_struct){
-    
     if((* class_struct).degree_cnt>15&&(* class_struct).degree_cnt<=22){
         (* class_struct).i_target=-0.45;
     }
@@ -621,16 +662,18 @@ void PysbMotorClassPositionControl(struct class_handle * class_struct){
 /* ------------------------------------------------------------------------------------------------*/
 
 inline void PysbMotorSpeedSampling(struct SpeedHandle * speed_struct){
-    /* TickType_t xLastWakeTime;
-    xLastWakeTime = xTaskGetTickCount();
-    enc_cnt = encoder->get_counter_value(encoder);
-    speed_struct->enc_cnt_p = enc_cnt;
-    vTaskDelayUntil(&xLastWakeTime, 10/ portTICK_PERIOD_MS);
-    enc_cnt = encoder->get_counter_value(encoder); */
-    speed_struct->v_current = SpeedSample();/* (float)(enc_cnt - speed_struct->enc_cnt_p) * PARA_ENCODER;  */
-    if(speed_struct->v_current<=40&&speed_struct->v_current>=-40){
-        printf("exist auto running\n");
-        speedflag=0;    //结束自动运行
+    speed_struct->v_current = SpeedSample();
+    if(speed_struct->v_target>0){
+        if(speed_struct->v_current<=10){
+            printf("exist auto running\n");
+            speedflag=0;    //结束自动运行
+        }
+    }
+    if(speed_struct->v_target<0){
+        if(speed_struct->v_current>=-10){
+            printf("exist auto running\n");
+            speedflag=0;    //结束自动运行
+        }
     }
 }
 
