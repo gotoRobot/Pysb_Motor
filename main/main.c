@@ -77,17 +77,22 @@ struct SpeedHandle speed_struct1={0,0,0,0,0,0};
 
 //动态脱手检测：
 inline bool stable_judgment(struct SpeedHandle *speed_struct){
-    int16_t v_sum;
+    float v_sum;
+    v_sum=0;
     for(uint8_t i=0;i<7;i++){
-        v_sum += speed_struct->v_current_p[i];
+        v_sum =v_sum + speed_struct->v_current_p[i];
     }
-    return ((v_sum/7)-speed_struct->v_target)>=//TODO
+    float v_aver;
+    v_aver=v_sum/7;
+    /* printf("v_averange:%f\n",v_aver); */
+    return (v_aver-speed_struct->v_target)>=-10&&(v_aver-speed_struct->v_target)<=10;
 }
 
 inline bool increasing_judgment(struct SpeedHandle *speed_struct){
+    uint8_t i=1;
     if(speed_struct->v_target>=0){
-        for(uint8_t i=1;i<7;){
-            if(speed_struct->v_current_p[i]>=speed_struct->v_current_p[i-1])
+        for(  i=1;i<7;){
+            if(speed_struct->v_current_p[i]>speed_struct->v_current_p[i-1])
                 i++;
             else
                 return false;
@@ -95,8 +100,8 @@ inline bool increasing_judgment(struct SpeedHandle *speed_struct){
         return true;
     }
     else{
-        for(uint8_t i=1;i<7;){
-        if(speed_struct->v_current_p[i]<=speed_struct->v_current_p[i-1])
+        for(  i=1;i<7;){
+        if(speed_struct->v_current_p[i]<speed_struct->v_current_p[i-1])
             i++;
         else
             return false;
@@ -106,9 +111,10 @@ inline bool increasing_judgment(struct SpeedHandle *speed_struct){
 };
 
 inline bool decreasing_judgment(struct SpeedHandle *speed_struct){
-    if(speed_struct->v_target>=0){
-        for(uint8_t i=1;i<7;){
-            if(speed_struct->v_current_p[i]>=speed_struct->v_current_p[i-1])
+    uint8_t i=1;
+    if(speed_struct->v_target>0){
+        for(i=1;i<7;){
+            if(speed_struct->v_current_p[i]< speed_struct->v_current_p[i-1])
                 i++;
             else
                 return false;
@@ -116,8 +122,8 @@ inline bool decreasing_judgment(struct SpeedHandle *speed_struct){
         return true;
     }
     else{
-        for(uint8_t i=1;i<7;){
-        if(speed_struct->v_current_p[i]<=speed_struct->v_current_p[i-1])
+        for(  i=1;i<7;){
+        if(speed_struct->v_current_p[i]> speed_struct->v_current_p[i-1])
             i++;
         else
             return false;
@@ -385,11 +391,12 @@ void PysbMotorLoop(struct StartHandle * start_handle){
         float raw_val;
         float i_error_speed;
         //动态脱手检测：
-        bool stableflag;
-        bool judgmentflag;
+        bool stableflag=0;
+        bool judgmentflag=0;
         speedflag=1;
         speed_struct1.v_target=start_handle0.v_max*0.5;
         uint8_t j=0;    //动态脱手检测：用于记录前7个数据
+        uint8_t i=1;
         if(speed_struct1.v_target>=300){
             speed_struct1.v_target=300;
         }
@@ -415,16 +422,38 @@ void PysbMotorLoop(struct StartHandle * start_handle){
                 j++;
             }
             else{
-                for(uint8_t i=1;i<6;i++){
+                for(i=1;i<7;i++){
                     speed_struct->v_current_p[i-1]=speed_struct->v_current_p[i];
                 }
                 speed_struct->v_current_p[6]=speed_struct->v_current;
             }
-            judgmentflag=(increasing_judgment(speed_struct)||decreasing_judgment(speed_struct));
-            if(judgmentflag){
-                ESP_LOGI(tagSpeed,"go into speedsetting");
+
+            if(stableflag==0){
+                stableflag=stable_judgment(speed_struct);
+                if(stableflag){
+                    printf("stable\n");
+                }
             }
-            printf("%f\t%f\n",speed_struct1.v_current,speed_struct1.v_target);
+            
+            if(stableflag){
+                judgmentflag=(increasing_judgment(speed_struct)||decreasing_judgment(speed_struct));
+                if(judgmentflag==1){
+                    printf("go into speedsetting\n");
+                    //加入修改目标速度的代码
+                    stableflag=0;
+                }
+                else{
+                    printf("nothinghappened\n");
+                }
+            }
+            
+            /* for(i=0;i<7;i++){
+                printf("%f\t",speed_struct->v_current_p[i]);
+            }
+            printf("%f",speed_struct->v_target);
+            printf("\n"); */
+            
+            /* printf("%f\t%f\n",speed_struct1.v_current,speed_struct1.v_target); */
             /* ESP_LOGI(tagSpeed,"%f\t%f",speed_struct1.v_current,speed_struct1.v_target); */
             /* ESP_LOGI(tagClass,"Class:%d",class_struct1.class_cnt); */
             while(xQueueReceive(power_queue, &raw_val, portMAX_DELAY) != pdTRUE){
@@ -455,7 +484,10 @@ void PysbMotorLoop(struct StartHandle * start_handle){
             speed_struct->v_target=0;
             speed_struct->v_current=0;
             speed_struct->e_sum=0;
+            j=0;
+            i=0;
             //动态脱手检测：
+            stableflag=0;
             judgmentflag=0;
             for(uint8_t i=0;i<7;i++){
                 speed_struct->v_current_p[i]=0;
