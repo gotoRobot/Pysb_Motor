@@ -18,6 +18,7 @@
 #include <math.h>
 
 #define CLASS 3
+#define LENTH_1 7
 
 #define TIMER_DIVIDER         (16)  //  Hardware timer clock divider
 #define TIMER_SCALE           (TIMER_BASE_CLK / TIMER_DIVIDER)  // convert counter value to seconds
@@ -70,67 +71,10 @@ struct SpeedHandle{
     float v_error;
     float i_target;//仅用于在control环节做额定电流设置
     int32_t enc_cnt_p;
-    float v_current_p[7];
+    float v_current_p[LENTH_1];
 };
 struct SpeedHandle * speed_struct;
 struct SpeedHandle speed_struct1={0,0,0,0,0,0};
-
-//动态脱手检测：
-inline bool stable_judgment(struct SpeedHandle *speed_struct){
-    float v_sum;
-    v_sum=0;
-    for(uint8_t i=0;i<7;i++){
-        v_sum =v_sum + speed_struct->v_current_p[i];
-    }
-    float v_aver;
-    v_aver=v_sum/7;
-    /* printf("v_averange:%f\n",v_aver); */
-    return (v_aver-speed_struct->v_target)>=-10&&(v_aver-speed_struct->v_target)<=10;
-}
-
-inline bool increasing_judgment(struct SpeedHandle *speed_struct){
-    uint8_t i=1;
-    if(speed_struct->v_target>=0){
-        for(  i=1;i<7;){
-            if(speed_struct->v_current_p[i]>speed_struct->v_current_p[i-1])
-                i++;
-            else
-                return false;
-        }
-        return true;
-    }
-    else{
-        for(  i=1;i<7;){
-        if(speed_struct->v_current_p[i]<speed_struct->v_current_p[i-1])
-            i++;
-        else
-            return false;
-        }
-        return true;
-    }
-};
-
-inline bool decreasing_judgment(struct SpeedHandle *speed_struct){
-    uint8_t i=1;
-    if(speed_struct->v_target>0){
-        for(i=1;i<7;){
-            if(speed_struct->v_current_p[i]< speed_struct->v_current_p[i-1])
-                i++;
-            else
-                return false;
-        }
-        return true;
-    }
-    else{
-        for(  i=1;i<7;){
-        if(speed_struct->v_current_p[i]> speed_struct->v_current_p[i-1])
-            i++;
-        else
-            return false;
-        }
-        return true;
-    }
-};
 
 bool speedflag=0;     //1,自动运行；0,不自动运行
 #define i_limit 0.45f
@@ -148,7 +92,8 @@ struct StartHandle * start_handle=&start_handle0;
 #define V_End_TH 20
 #define V_Start_TH 100
 #define Blocked_Rotation_Voltage 3.0f
-
+#define V_AVERAGE_TH 10 //stable检验，平均值与目标值
+#define V_GAP_TH 30     //stable检验，单个数据偏差限额
 TimerHandle_t rotary_settings_timer;
 bool loopflag=0;
 
@@ -191,7 +136,7 @@ inline void PysbMotorSpeedSampling(struct SpeedHandle * speed_struct);
 void PysbMotorSpeedControl(struct SpeedHandle * speed_struct);
 
 void RotartSettingsCallback( TimerHandle_t rotary_settings_timer);
-void PysbMotorLoop(struct StartHandle * start_handle);
+void PysbMotorLoop();
 void PysbMotorLoopReset(struct StartHandle * start_handle);
 
 void printf_speed(){
@@ -220,6 +165,102 @@ QueueHandle_t position_queue;
 QueueHandle_t class_queue;
 QueueHandle_t speed_queue;
 int32_t g_adc_offset; 
+
+//动态脱手检测：
+inline bool stable_judgment(struct SpeedHandle *speed_struct){
+    float v_sum;
+    float v_gap;//标准差
+    float v_gap_max=0;
+    v_sum=0;
+    for(uint8_t i=0;i<LENTH_1;i++){
+        v_sum =v_sum + speed_struct->v_current_p[i];
+        v_gap=speed_struct->v_current_p[i]-speed_struct->v_target;
+        v_gap = abs(v_gap);
+        if(v_gap_max<v_gap){
+            v_gap_max=v_gap;
+        }
+    }
+    float v_aver;
+    v_aver=v_sum/LENTH_1;
+    /* printf("v_averange:%f\n",v_aver); */
+
+    return (v_aver-speed_struct->v_target)>=-V_AVERAGE_TH && (v_aver-speed_struct->v_target)<=V_AVERAGE_TH && v_gap_max<=V_GAP_TH;
+}
+
+inline bool increasing_judgment(struct SpeedHandle *speed_struct){
+    uint8_t i=1;
+    if(speed_struct->v_target>=0){
+        for(  i=1;i<LENTH_1;){
+            if(speed_struct->v_current_p[i]>speed_struct->v_current_p[i-1])
+                i++;
+            else
+                return false;
+        }
+        return true;
+    }
+    else{
+        for(  i=1;i<LENTH_1;){
+        if(speed_struct->v_current_p[i]<speed_struct->v_current_p[i-1])
+            i++;
+        else
+            return false;
+        }
+        return true;
+    }
+};
+
+inline bool decreasing_judgment(struct SpeedHandle *speed_struct){
+    uint8_t i=1;
+    if(speed_struct->v_current>=0){
+        if(speed_struct->v_current-speed_struct->v_target<=70){
+            for(i=1;i<LENTH_1;){
+                if(speed_struct->v_current_p[i] <= speed_struct->v_current_p[i-1]){
+                    i++;
+                }
+                else
+                    return false;
+            }
+            return true;
+        }
+        else
+            return false;
+    }
+    else{
+        if(speed_struct->v_current-speed_struct->v_target>=70){
+            for(  i=1;i<LENTH_1;){
+                if(speed_struct->v_current_p[i] >= speed_struct->v_current_p[i-1])
+                    i++;
+                else
+                    return false;
+            }
+            return true;
+        }
+        else
+            return false;
+    }
+}
+
+inline bool decreasingstable_judgment(struct SpeedHandle *speed_struct){
+    uint8_t i=1;
+    float v_sum;
+    float v_gap;//估计标准差，相邻两个数据差的绝对值
+    float v_gap_max=0;
+    v_sum=0;
+    for(i=0;i<LENTH_1;i++){
+        v_sum =v_sum + speed_struct->v_current_p[i];
+    }
+    float v_aver;
+    v_aver=v_sum/LENTH_1;
+    for(i=0;i<LENTH_1;i++){
+        v_gap=speed_struct->v_current_p[i]-v_aver;
+        v_gap = abs(v_gap);
+        if(v_gap_max<v_gap){
+            v_gap_max=v_gap;
+        }
+    }
+
+    return v_gap_max<=V_GAP_TH;
+}
 
 inline void PysbMotorInit(){
     PysbMotorInitA();
@@ -324,15 +365,7 @@ void RotartSettingsCallback( TimerHandle_t rotary_settings_timer){
     //判定最终速度较大，进入自动运行模式
 }
 
-void PysbMotorLoop(struct StartHandle * start_handle){
-    //检测v_current循环
-    if(start_handle->v_start<=V_Start_TH&&start_handle->v_start>=-V_Start_TH){
-        printf("v_startSampling\n");
-    }
-    while(start_handle->v_start<=V_Start_TH&&start_handle->v_start>=-V_Start_TH){
-        start_handle->v_start = SpeedSample();
-    }
-
+inline void PysbMotorTargetSpeedSetting(){
     loopflag=1;     //计时结束后复位为0
     xTimerStart(rotary_settings_timer,0);
     
@@ -357,7 +390,7 @@ void PysbMotorLoop(struct StartHandle * start_handle){
                 }
             }//refresh v_max
             start_handle->CW='L';
-            u=-Blocked_Rotation_Voltage;
+            u=-Blocked_Rotation_Voltage;    //hit 保持旋转的最低电压
         }
         else if(start_handle->v_current<0){
             if(start_handle->v_current<v_max_negative){
@@ -383,19 +416,38 @@ void PysbMotorLoop(struct StartHandle * start_handle){
 
         mcpwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_GEN_A, (1 - (u + 5.0f) / 10.0f) * 100);
         mcpwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_GEN_B, (u + 5.0f) / 10.0f * 100);
-
-        start_handle->enc_cnt_p = enc_cnt;
     }
+}
 
+
+void PysbMotorLoop(){
+    //检测v_current循环
+    if(start_handle->v_start<=V_Start_TH&&start_handle->v_start>=-V_Start_TH){
+        printf("v_startSampling\n");
+    }
+    while(start_handle->v_start<=V_Start_TH&&start_handle->v_start>=-V_Start_TH){
+        start_handle->v_start = SpeedSample();
+    }
+    PysbMotorTargetSpeedSetting();
+    
     if(start_handle0.v_end>=V_End_TH||start_handle0.v_end<=-V_End_TH){
         float raw_val;
         float i_error_speed;
         //动态脱手检测：
         bool stableflag=0;
-        bool judgmentflag=0;
+        bool decreasingstableflag = 0;
+        bool increasingflag=0;
+        bool decreasingflag=0;
         speedflag=1;
+        //TODO1:通信
+        if(start_handle0.v_end>=V_End_TH){
+            /* wheelDriverBleTx(ControlBlock, u8 *tx_buffer, u16 tx_buffer_len) */
+        }
+        else{
+            /* wheelDriverBleTx(ControlBlock, u8 *tx_buffer, u16 tx_buffer_len) */
+        }
         speed_struct1.v_target=start_handle0.v_max*0.5;
-        uint8_t j=0;    //动态脱手检测：用于记录前7个数据
+        uint8_t j=0;    //动态脱手检测：用于记录前LENTH_1个数据
         uint8_t i=1;
         if(speed_struct1.v_target>=300){
             speed_struct1.v_target=300;
@@ -404,25 +456,17 @@ void PysbMotorLoop(struct StartHandle * start_handle){
             speed_struct1.v_target=-300;
         }
         printf("auto running\n"); 
-        //TODO1
-        if(start_handle0.v_end>=V_End_TH){
-            /* wheelDriverBleTx(ControlBlock, u8 *tx_buffer, u16 tx_buffer_len) */
-        }
-        else{
-            /* wheelDriverBleTx(ControlBlock, u8 *tx_buffer, u16 tx_buffer_len) */
-        }
-        
         while(speedflag!=0){
             PysbMotorSpeedSampling(speed_struct);   //当检测到速度被捏停退出循环，TODO2，当检测到速度重新设定时进入改变v_target流程
             PysbMotorSpeedControl(speed_struct);    //控制速度
             /* printf_speed(); */
             //动态脱手检测：
-            if(j!=7){
+            if(j!=LENTH_1){
                 speed_struct->v_current_p[j]=speed_struct->v_current;
                 j++;
             }
             else{
-                for(i=1;i<7;i++){
+                for(i=1;i<LENTH_1;i++){
                     speed_struct->v_current_p[i-1]=speed_struct->v_current_p[i];
                 }
                 speed_struct->v_current_p[6]=speed_struct->v_current;
@@ -433,27 +477,49 @@ void PysbMotorLoop(struct StartHandle * start_handle){
                 if(stableflag){
                     printf("stable\n");
                 }
-            }
-            
+            }            
             if(stableflag){
-                judgmentflag=(increasing_judgment(speed_struct)||decreasing_judgment(speed_struct));
-                if(judgmentflag==1){
-                    printf("go into speedsetting\n");
-                    //加入修改目标速度的代码
+                increasingflag = increasing_judgment(speed_struct);
+                decreasingflag = decreasing_judgment(speed_struct);
+                if(increasingflag){
                     stableflag=0;
+                    printf("accelerating\n");
+                    PysbMotorTargetSpeedSetting();
+                    speed_struct1.v_target=start_handle0.v_max*0.5;
+                    if(speed_struct1.v_target>=300){
+                        speed_struct1.v_target=300;
+                    }
+                    else if(speed_struct1.v_target<=-300){
+                        speed_struct1.v_target=-300;
+                    }
+                    speed_struct->e_sum = 0;
+                    printf("auto running\n"); 
+                    //TODO1:添加通讯                    
+                }
+                else if(decreasingflag){
+                    stableflag=0;
+                    printf("decelerating\n");
+                    decreasingstableflag = decreasingstable_judgment(speed_struct);
+                    if(decreasingstableflag){
+                        printf("decreasingstable\n");
+                        PysbMotorTargetSpeedSetting();
+                        speed_struct1.v_target=start_handle0.v_end;
+                        speed_struct->e_sum = 0;
+                        printf("auto running");
+                    }
                 }
                 else{
-                    printf("nothinghappened\n");
+                    printf("nothing happened\n");
                 }
             }
             
-            /* for(i=0;i<7;i++){
+            /* for(i=0;i<LENTH_1;i++){
                 printf("%f\t",speed_struct->v_current_p[i]);
             }
             printf("%f",speed_struct->v_target);
             printf("\n"); */
             
-            /* printf("%f\t%f\n",speed_struct1.v_current,speed_struct1.v_target); */
+            printf("%f\t%f\n",speed_struct1.v_current,speed_struct1.v_target);
             /* ESP_LOGI(tagSpeed,"%f\t%f",speed_struct1.v_current,speed_struct1.v_target); */
             /* ESP_LOGI(tagClass,"Class:%d",class_struct1.class_cnt); */
             while(xQueueReceive(power_queue, &raw_val, portMAX_DELAY) != pdTRUE){
@@ -488,8 +554,9 @@ void PysbMotorLoop(struct StartHandle * start_handle){
             i=0;
             //动态脱手检测：
             stableflag=0;
-            judgmentflag=0;
-            for(uint8_t i=0;i<7;i++){
+            increasingflag=0;
+            decreasingflag=0;
+            for(uint8_t i=0;i<LENTH_1;i++){
                 speed_struct->v_current_p[i]=0;
             }
         }
@@ -670,7 +737,7 @@ inline void PysbMotorClassPositionSet(struct class_handle * class_struct){
 #define k1 0.0241f
 #define k2 0.000000241f
 void PysbMotorPositionControl(struct position_handle *position_struct){
-    /* enc_cnt=encoder->get_counter_value(encoder); */
+    enc_cnt=encoder->get_counter_value(encoder);
     (*position_struct).pos_error=enc_cnt-(*position_struct).pos_target;
     if((*position_struct).pos_error>15&&(*position_struct).pos_error<=22){
         (*position_struct).i_target=0;
@@ -743,35 +810,17 @@ inline void PysbMotorSpeedSampling(struct SpeedHandle * speed_struct){
     }
 }
 
-void PysbMotorSpeedControl(struct SpeedHandle * speed_struct){ 
+void PysbMotorSpeedControl(struct SpeedHandle * speed_struct){
+    
     speed_struct->v_error = speed_struct->v_current - speed_struct->v_target;//TODO:easy to make wrong direction
 
+    
+    speed_struct->e_sum +=speed_struct-> v_error;
+    
+    speed_struct->i_target = speed_struct->v_error* 0.0249797f +speed_struct-> e_sum * 0.00044505f ;//TODO: +speed_struct-> e_sum * 0.00044505f
+    if (speed_struct->v_error * speed_struct->v_error < 0)
     {
-        speed_struct->e_sum +=speed_struct-> v_error;
-    }
-    if (speed_struct->v_target > MIN_V || speed_struct->v_target < -MIN_V)//we only control current if velocity is high enough
-        speed_struct->i_target = speed_struct->v_error* 0.0249797f +speed_struct-> e_sum * 0.00044505f ;//TODO: +speed_struct-> e_sum * 0.00044505f
-    else{
-        speed_struct->i_target = 0;
         speed_struct->e_sum = 0;
-    }
-
-    if (speed_struct->v_target > MAX_V){
-        speed_struct->v_target = MAX_V;
-    }
-    else if (speed_struct->v_target < -MAX_V){
-       speed_struct-> v_target = -MAX_V;
-    }
-//设定最大电流，同时也检测v_error是否反向了
-     
-    if(speed_struct->v_target<240)      //低速控制
-    {
-        if (speed_struct->i_target >= i_limit){
-            speed_struct->i_target = i_limit;
-        } //rotating B direction
-        if (speed_struct->i_target <= -i_limit) {
-            speed_struct->i_target = -i_limit;
-        }
     }
 
 }
